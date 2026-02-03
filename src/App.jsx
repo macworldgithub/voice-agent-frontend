@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
-const API_BASE = 'https://voice-agent-backend-weld.vercel.app';
+const API_BASE = 'https://voice-agent-backend-beta.vercel.app';
 
 
 function App() {
