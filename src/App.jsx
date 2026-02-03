@@ -337,7 +337,6 @@
 
 // export default App;
 
-// src/App.jsx
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
@@ -347,7 +346,7 @@ function App() {
   const [callActive, setCallActive] = useState(false);
   const [status, setStatus] = useState('Ready to start');
   const [recordingUrl, setRecordingUrl] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(''); // For mobile debugging (remove in production)
+  const [debugInfo, setDebugInfo] = useState(''); // remove in production
 
   const transcriptLinesRef = useRef([]);
   const summaryTextRef = useRef('');
@@ -359,17 +358,18 @@ function App() {
   const isListeningRef = useRef(false);
   const isSpeakingRef = useRef(false);
   const callActiveRef = useRef(false);
+  const restartAttemptsRef = useRef(0); // prevent infinite restart loop
 
   useEffect(() => {
     callActiveRef.current = callActive;
   }, [callActive]);
 
-  // Speech Recognition setup
+  // ─── Speech Recognition Setup ───────────────────────────────────────
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setStatus('Voice recognition not supported');
-      setDebugInfo('No SpeechRecognition API');
+      setStatus('Voice recognition not supported in this browser');
+      setDebugInfo('No SpeechRecognition API available');
       return;
     }
 
@@ -377,7 +377,7 @@ function App() {
     rec.continuous = true;
     rec.interimResults = false;
     rec.lang = 'en-US';
-    rec.maxAlternatives = 3; // Helps on mobile
+    rec.maxAlternatives = 3;
 
     recognitionRef.current = rec;
 
@@ -386,7 +386,7 @@ function App() {
     };
   }, []);
 
-  // TTS voice selection – prefer natural voices
+  // ─── TTS Voice Selection ────────────────────────────────────────────
   useEffect(() => {
     const loadVoices = () => {
       const voices = window.speechSynthesis.getVoices();
@@ -400,14 +400,13 @@ function App() {
 
       selectedVoiceRef.current = preferred;
 
-      setDebugInfo(prev => prev + `\nSelected voice: ${preferred?.name || 'default'} (${preferred?.lang || '?'})`);
+      setDebugInfo(prev => prev + `\nSelected TTS voice: ${preferred?.name || 'default'} (${preferred?.lang || '?'})`);
     };
 
     window.speechSynthesis.onvoiceschanged = loadVoices;
     loadVoices();
   }, []);
 
-  // Define speak
   const speak = (text) => {
     if (!text) return;
 
@@ -423,18 +422,16 @@ function App() {
     if (selectedVoiceRef.current) utter.voice = selectedVoiceRef.current;
     utter.rate = 1.05;
     utter.pitch = 1.0;
-    utter.volume = 1.0;
 
     utter.onend = () => {
       isSpeakingRef.current = false;
       if (callActiveRef.current) {
-        setTimeout(startListeningIfNeeded, 400);
+        setTimeout(startListeningIfNeeded, 700); // longer delay on mobile
       }
       setStatus('Listening...');
     };
 
-    utter.onerror = (e) => {
-      console.error('TTS error:', e);
+    utter.onerror = () => {
       isSpeakingRef.current = false;
       if (callActiveRef.current) startListeningIfNeeded();
     };
@@ -444,29 +441,37 @@ function App() {
     transcriptLinesRef.current.push({ role: 'agent', text });
   };
 
-  // Define startListeningIfNeeded
   const startListeningIfNeeded = () => {
     if (!recognitionRef.current) return;
     if (!callActiveRef.current) return;
     if (isListeningRef.current || isSpeakingRef.current) return;
 
+    // Safety limit: stop trying after too many quick failures
+    if (restartAttemptsRef.current > 8) {
+      setStatus('Too many failed attempts — please end & restart call');
+      setDebugInfo(prev => prev + '\nStopped auto-restarting (too many failures)');
+      return;
+    }
+
     try {
       recognitionRef.current.start();
       isListeningRef.current = true;
+      restartAttemptsRef.current++;
       setStatus('Listening...');
-      setDebugInfo(prev => prev + '\n→ Listening started');
+      setDebugInfo(prev => prev + `\nListening started (attempt ${restartAttemptsRef.current})`);
     } catch (err) {
-      console.warn('Start failed:', err);
+      console.warn('recognition.start failed:', err);
       setDebugInfo(prev => prev + `\nStart failed: ${err.name || err.message}`);
       isListeningRef.current = false;
-      setTimeout(startListeningIfNeeded, 800);
+      setTimeout(startListeningIfNeeded, 1400);
     }
   };
 
-  // Define endCall (moved up so it's available in event handlers)
+  // Define endCall BEFORE useEffect that uses it
   const endCall = async () => {
     setCallActive(false);
     setStatus('Call ended');
+    restartAttemptsRef.current = 0;
 
     if (recognitionRef.current && isListeningRef.current) {
       recognitionRef.current.stop?.();
@@ -517,6 +522,7 @@ function App() {
 
       rec.stop?.();
       isListeningRef.current = false;
+      restartAttemptsRef.current = 0; // reset counter on real speech
       setDebugInfo(prev => prev + `\nHeard: "${text}"`);
 
       transcriptLinesRef.current.push({ role: 'user', text });
@@ -529,10 +535,10 @@ function App() {
         messagesRef.current.push({ role: 'assistant', content: assistantText });
 
         const lower = assistantText.toLowerCase();
-        if (lower.includes('goodbye') || lower.includes('end call') || 
+        if (lower.includes('goodbye') || lower.includes('end call') ||
             lower.includes('hang up') || lower.includes('terminate')) {
           transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
-          endCall(); // Now defined and accessible
+          endCall();
           return;
         }
 
@@ -541,15 +547,17 @@ function App() {
         console.error(err);
         setStatus('Connection error — please try again');
         setDebugInfo(prev => prev + `\nBackend error: ${err.message}`);
-        setTimeout(startListeningIfNeeded, 1200);
+        setTimeout(startListeningIfNeeded, 1800);
       }
     };
 
     rec.onend = () => {
       isListeningRef.current = false;
       setDebugInfo(prev => prev + '\nRecognition ended');
+
       if (callActiveRef.current && !isSpeakingRef.current) {
-        setTimeout(startListeningIfNeeded, 400);
+        // Longer delay to avoid tight loop on mobile
+        setTimeout(startListeningIfNeeded, 1200);
       }
     };
 
@@ -558,13 +566,14 @@ function App() {
       setDebugInfo(prev => prev + `\nRecognition error: ${e.error}`);
 
       if (e.error === 'no-speech') {
-        setTimeout(startListeningIfNeeded, 600);
+        // Don't restart immediately after silence
+        setTimeout(startListeningIfNeeded, 1400);
       } else if (e.error === 'not-allowed' || e.error === 'permission-denied') {
         setStatus('Microphone permission denied');
       } else if (e.error === 'service-not-allowed') {
-        setStatus('Speech service not available');
+        setStatus('Speech service not available on this device');
       } else {
-        setTimeout(startListeningIfNeeded, 1000);
+        setTimeout(startListeningIfNeeded, 1600);
       }
     };
 
@@ -573,16 +582,15 @@ function App() {
       rec.onend = null;
       rec.onerror = null;
     };
-  }, [endCall]); // Dependency on endCall to ensure re-attachment if needed
+  }, [endCall]); // Re-attach if endCall changes (rare)
 
-  // Backend functions
   const backendChat = async (msgs) => {
     const res = await fetch(`${API_BASE}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: msgs }),
     });
-    if (!res.ok) throw new Error('Chat failed');
+    if (!res.ok) throw new Error('chat failed');
     const { assistant } = await res.json();
     return assistant || '';
   };
@@ -594,7 +602,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript: fullTranscript }),
       });
-      if (!res.ok) throw new Error('Summary failed');
+      if (!res.ok) throw new Error('summary failed');
       const { summary } = await res.json();
       return summary || 'No summary generated';
     } catch (err) {
@@ -636,6 +644,7 @@ function App() {
     audioChunksRef.current = [];
     isListeningRef.current = false;
     isSpeakingRef.current = false;
+    restartAttemptsRef.current = 0;
     setDebugInfo('Call started');
 
     setStatus('Starting call...');
@@ -646,9 +655,9 @@ function App() {
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = e => audioChunksRef.current.push(e.data);
       recorder.start();
-      setDebugInfo(prev => prev + '\nMic access granted');
+      setDebugInfo(prev => prev + '\nMicrophone access granted');
     } catch (err) {
-      console.error('Mic error:', err);
+      console.error('Microphone error:', err);
       setDebugInfo(prev => prev + `\nMic error: ${err.name || err.message}`);
       alert("Couldn't access microphone. Please allow permission.");
       setCallActive(false);
@@ -684,19 +693,21 @@ function App() {
 
         <div className="status-text">{status}</div>
 
-        {/* Debug info for testing (remove in production) */}
+        {/* Debug output — very useful on mobile */}
         {debugInfo && (
           <div style={{
-            marginTop: '1rem',
-            fontSize: '0.85rem',
-            color: '#94a3b8',
+            margin: '1.2rem auto',
+            padding: '1rem',
+            background: 'rgba(0,0,0,0.45)',
+            borderRadius: '12px',
+            fontSize: '0.9rem',
+            color: '#cbd5e1',
             whiteSpace: 'pre-wrap',
             textAlign: 'left',
             maxWidth: '90%',
-            background: 'rgba(0,0,0,0.4)',
-            padding: '0.8rem',
-            borderRadius: '8px',
-            overflowX: 'auto'
+            maxHeight: '180px',
+            overflowY: 'auto',
+            lineHeight: 1.4
           }}>
             {debugInfo}
           </div>
