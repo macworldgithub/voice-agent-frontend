@@ -337,6 +337,7 @@
 
 // export default App;
 
+// src/App.jsx
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
@@ -346,7 +347,7 @@ function App() {
   const [callActive, setCallActive] = useState(false);
   const [status, setStatus] = useState('Ready to start');
   const [recordingUrl, setRecordingUrl] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(''); // temporary for mobile debugging
+  const [debugInfo, setDebugInfo] = useState(''); // For mobile debugging (remove in production)
 
   const transcriptLinesRef = useRef([]);
   const summaryTextRef = useRef('');
@@ -363,12 +364,12 @@ function App() {
     callActiveRef.current = callActive;
   }, [callActive]);
 
-  // ─── Speech Recognition Setup ───────────────────────────────────────
+  // Speech Recognition setup
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setStatus('Voice recognition not supported in this browser');
-      setDebugInfo('No SpeechRecognition API available');
+      setStatus('Voice recognition not supported');
+      setDebugInfo('No SpeechRecognition API');
       return;
     }
 
@@ -376,8 +377,7 @@ function App() {
     rec.continuous = true;
     rec.interimResults = false;
     rec.lang = 'en-US';
-    // Important for mobile: increase maxAlternatives and handle mobile quirks
-    rec.maxAlternatives = 3;
+    rec.maxAlternatives = 3; // Helps on mobile
 
     recognitionRef.current = rec;
 
@@ -386,30 +386,28 @@ function App() {
     };
   }, []);
 
-  // ─── TTS Voice Selection – prefer natural / high quality voices ─────
+  // TTS voice selection – prefer natural voices
   useEffect(() => {
     const loadVoices = () => {
       const voices = window.speechSynthesis.getVoices();
-      // Log all voices (you can check console on mobile)
       console.log('Available voices:', voices.map(v => `${v.name} (${v.lang})`));
 
-      // Prefer natural, female, or high-quality voices
       const preferred =
         voices.find(v => /natural|female|google|microsoft|premium|samantha|eva|joanna/i.test(v.name)) ||
-        voices.find(v => v.lang.startsWith('en') && v.localService === false) || // prefer cloud voices
+        voices.find(v => v.lang.startsWith('en') && v.localService === false) ||
         voices.find(v => v.lang.startsWith('en')) ||
         voices[0];
 
       selectedVoiceRef.current = preferred;
 
-      // Show which voice was selected (for debugging)
       setDebugInfo(prev => prev + `\nSelected voice: ${preferred?.name || 'default'} (${preferred?.lang || '?'})`);
     };
 
     window.speechSynthesis.onvoiceschanged = loadVoices;
-    loadVoices(); // call immediately in case voices are already loaded
+    loadVoices();
   }, []);
 
+  // Define speak
   const speak = (text) => {
     if (!text) return;
 
@@ -422,9 +420,7 @@ function App() {
     setStatus('Speaking...');
 
     const utter = new SpeechSynthesisUtterance(text);
-    if (selectedVoiceRef.current) {
-      utter.voice = selectedVoiceRef.current;
-    }
+    if (selectedVoiceRef.current) utter.voice = selectedVoiceRef.current;
     utter.rate = 1.05;
     utter.pitch = 1.0;
     utter.volume = 1.0;
@@ -432,7 +428,7 @@ function App() {
     utter.onend = () => {
       isSpeakingRef.current = false;
       if (callActiveRef.current) {
-        setTimeout(startListeningIfNeeded, 400); // slightly longer delay on mobile
+        setTimeout(startListeningIfNeeded, 400);
       }
       setStatus('Listening...');
     };
@@ -448,6 +444,7 @@ function App() {
     transcriptLinesRef.current.push({ role: 'agent', text });
   };
 
+  // Define startListeningIfNeeded
   const startListeningIfNeeded = () => {
     if (!recognitionRef.current) return;
     if (!callActiveRef.current) return;
@@ -457,17 +454,59 @@ function App() {
       recognitionRef.current.start();
       isListeningRef.current = true;
       setStatus('Listening...');
-      setDebugInfo(prev => prev + '\n→ recognition.start() called');
+      setDebugInfo(prev => prev + '\n→ Listening started');
     } catch (err) {
-      console.warn('recognition.start failed:', err);
+      console.warn('Start failed:', err);
       setDebugInfo(prev => prev + `\nStart failed: ${err.name || err.message}`);
       isListeningRef.current = false;
-      // Retry after short delay (helps on some Android devices)
       setTimeout(startListeningIfNeeded, 800);
     }
   };
 
-  // Recognition handlers
+  // Define endCall (moved up so it's available in event handlers)
+  const endCall = async () => {
+    setCallActive(false);
+    setStatus('Call ended');
+
+    if (recognitionRef.current && isListeningRef.current) {
+      recognitionRef.current.stop?.();
+    }
+
+    let recordingBlob = null;
+    if (mediaRecorderRef.current) {
+      await new Promise(resolve => {
+        mediaRecorderRef.current.onstop = () => {
+          recordingBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          setRecordingUrl(URL.createObjectURL(recordingBlob));
+          resolve();
+        };
+        mediaRecorderRef.current.stop?.();
+      });
+    }
+
+    const fullTranscript = transcriptLinesRef.current
+      .map(l => `${l.role === 'user' ? 'You' : 'Agent'}: ${l.text}`)
+      .join('\n\n');
+
+    let summ = '';
+    try {
+      summ = await backendSummary(fullTranscript);
+      summaryTextRef.current = summ;
+      setStatus('Creating summary • Sending email...');
+    } catch {
+      summaryTextRef.current = 'Could not generate summary';
+    }
+
+    try {
+      await uploadEmail(recordingBlob, fullTranscript, summaryTextRef.current);
+      setStatus('Email sent successfully');
+    } catch (err) {
+      setStatus('Could not send email');
+      console.error('Final email error:', err);
+    }
+  };
+
+  // Recognition event handlers
   useEffect(() => {
     const rec = recognitionRef.current;
     if (!rec) return;
@@ -493,7 +532,7 @@ function App() {
         if (lower.includes('goodbye') || lower.includes('end call') || 
             lower.includes('hang up') || lower.includes('terminate')) {
           transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
-          endCall();
+          endCall(); // Now defined and accessible
           return;
         }
 
@@ -523,14 +562,70 @@ function App() {
       } else if (e.error === 'not-allowed' || e.error === 'permission-denied') {
         setStatus('Microphone permission denied');
       } else if (e.error === 'service-not-allowed') {
-        setStatus('Speech service not available on this device');
+        setStatus('Speech service not available');
       } else {
         setTimeout(startListeningIfNeeded, 1000);
       }
     };
-  }, []);
 
-  // ... rest of your backendChat, backendSummary, uploadEmail functions remain the same ...
+    return () => {
+      rec.onresult = null;
+      rec.onend = null;
+      rec.onerror = null;
+    };
+  }, [endCall]); // Dependency on endCall to ensure re-attachment if needed
+
+  // Backend functions
+  const backendChat = async (msgs) => {
+    const res = await fetch(`${API_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: msgs }),
+    });
+    if (!res.ok) throw new Error('Chat failed');
+    const { assistant } = await res.json();
+    return assistant || '';
+  };
+
+  const backendSummary = async (fullTranscript) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/summary`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: fullTranscript }),
+      });
+      if (!res.ok) throw new Error('Summary failed');
+      const { summary } = await res.json();
+      return summary || 'No summary generated';
+    } catch (err) {
+      console.error('Summary error:', err);
+      return 'Could not create summary';
+    }
+  };
+
+  const uploadEmail = async (blob, transcriptText, summaryText) => {
+    try {
+      const form = new FormData();
+      form.append('transcript', transcriptText || 'No transcript available');
+      form.append('summary', summaryText || 'No summary available');
+      if (blob) form.append('recording', blob, 'mortgage-call.webm');
+
+      const res = await fetch(`${API_BASE}/api/email`, {
+        method: 'POST',
+        body: form,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Email failed');
+      }
+
+      return await res.json();
+    } catch (err) {
+      console.error('Email error:', err);
+      throw err;
+    }
+  };
 
   const startCall = async () => {
     setCallActive(true);
@@ -551,7 +646,7 @@ function App() {
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = e => audioChunksRef.current.push(e.data);
       recorder.start();
-      setDebugInfo(prev => prev + '\nMicrophone access granted');
+      setDebugInfo(prev => prev + '\nMic access granted');
     } catch (err) {
       console.error('Mic error:', err);
       setDebugInfo(prev => prev + `\nMic error: ${err.name || err.message}`);
@@ -573,12 +668,10 @@ function App() {
     }
   };
 
-  // endCall remains mostly the same (omitted for brevity)
-
   return (
     <div className="voice-agent-app">
       <div className="main-content">
-        <h1>Mort Voice Agent</h1>
+        <h1>Mortgage Voice Agent</h1>
         <p className="subtitle">Speak naturally — just like a phone call</p>
 
         <div className={`status-circle ${callActive ? (isSpeakingRef.current ? 'speaking' : 'listening') : ''}`}>
@@ -591,18 +684,19 @@ function App() {
 
         <div className="status-text">{status}</div>
 
-        {/* Debug info – remove in production */}
+        {/* Debug info for testing (remove in production) */}
         {debugInfo && (
           <div style={{
             marginTop: '1rem',
-            fontSize: '0.9rem',
+            fontSize: '0.85rem',
             color: '#94a3b8',
             whiteSpace: 'pre-wrap',
             textAlign: 'left',
             maxWidth: '90%',
-            background: 'rgba(0,0,0,0.3)',
+            background: 'rgba(0,0,0,0.4)',
             padding: '0.8rem',
-            borderRadius: '8px'
+            borderRadius: '8px',
+            overflowX: 'auto'
           }}>
             {debugInfo}
           </div>
@@ -622,7 +716,7 @@ function App() {
 
         {recordingUrl && (
           <div className="download-section">
-            <a href={recordingUrl} download="call.webm" className="download-link">
+            <a href={recordingUrl} download="mortgage-call.webm" className="download-link">
               Download this call recording
             </a>
           </div>
