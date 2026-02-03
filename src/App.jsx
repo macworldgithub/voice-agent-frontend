@@ -336,49 +336,43 @@
 // }
 
 // export default App;
-
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const API_BASE = 'https://agent.omnisuiteai.com';
 
 function App() {
-  const [callActive, setCallActive] = useState(false);
-  const [status, setStatus] = useState('Ready to start');
+  const [callActive, setCallActive]     = useState(false);
+  const [status, setStatus]             = useState('Ready to start');
   const [recordingUrl, setRecordingUrl] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(''); // remove in production
 
-  const transcriptLinesRef = useRef([]);
-  const summaryTextRef = useRef('');
-  const recognitionRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const messagesRef = useRef([]);
-  const selectedVoiceRef = useRef(null);
-  const isListeningRef = useRef(false);
-  const isSpeakingRef = useRef(false);
-  const callActiveRef = useRef(false);
-  const restartAttemptsRef = useRef(0); // prevent infinite restart loop
+  // Keep these for logic — but not displayed anymore
+  const transcriptLinesRef = useRef([]);     // we still collect for email
+  const summaryTextRef     = useRef('');     // we still collect for email
 
-  useEffect(() => {
-    callActiveRef.current = callActive;
-  }, [callActive]);
+  const recognitionRef     = useRef(null);
+  const mediaRecorderRef   = useRef(null);
+  const audioChunksRef     = useRef([]);
+  const messagesRef        = useRef([]);
+  const selectedVoiceRef   = useRef(null);
+  const isListeningRef     = useRef(false);
+  const isSpeakingRef      = useRef(false);
+  const callActiveRef      = useRef(false);
 
-  // ─── Speech Recognition Setup ───────────────────────────────────────
+  useEffect(() => { callActiveRef.current = callActive; }, [callActive]);
+
+  // Speech Recognition setup
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setStatus('Voice recognition not supported in this browser');
-      setDebugInfo('No SpeechRecognition API available');
+      alert("Voice recognition is not supported in this browser. Try Chrome on Android/iOS.");
       return;
     }
 
     const rec = new SpeechRecognition();
-    rec.continuous = true;
+    rec.continuous     = false;           // ← Most reliable on mobile
     rec.interimResults = false;
-    rec.lang = 'en-US';
-    rec.maxAlternatives = 3;
-
+    rec.lang           = 'en-US';
     recognitionRef.current = rec;
 
     return () => {
@@ -386,21 +380,14 @@ function App() {
     };
   }, []);
 
-  // ─── TTS Voice Selection ────────────────────────────────────────────
+  // TTS voice selection
   useEffect(() => {
     const loadVoices = () => {
       const voices = window.speechSynthesis.getVoices();
-      console.log('Available voices:', voices.map(v => `${v.name} (${v.lang})`));
-
-      const preferred =
-        voices.find(v => /natural|female|google|microsoft|premium|samantha|eva|joanna/i.test(v.name)) ||
-        voices.find(v => v.lang.startsWith('en') && v.localService === false) ||
-        voices.find(v => v.lang.startsWith('en')) ||
-        voices[0];
-
-      selectedVoiceRef.current = preferred;
-
-      setDebugInfo(prev => prev + `\nSelected TTS voice: ${preferred?.name || 'default'} (${preferred?.lang || '?'})`);
+      selectedVoiceRef.current =
+        voices.find(v => /Google|Microsoft|Natural/i.test(v.name)) ||
+        voices[0] ||
+        null;
     };
 
     window.speechSynthesis.onvoiceschanged = loadVoices;
@@ -408,8 +395,6 @@ function App() {
   }, []);
 
   const speak = (text) => {
-    if (!text) return;
-
     if (recognitionRef.current && isListeningRef.current) {
       recognitionRef.current.stop?.();
       isListeningRef.current = false;
@@ -420,24 +405,27 @@ function App() {
 
     const utter = new SpeechSynthesisUtterance(text);
     if (selectedVoiceRef.current) utter.voice = selectedVoiceRef.current;
-    utter.rate = 1.05;
+    utter.rate  = 1.05;
     utter.pitch = 1.0;
 
     utter.onend = () => {
       isSpeakingRef.current = false;
       if (callActiveRef.current) {
-        setTimeout(startListeningIfNeeded, 700); // longer delay on mobile
+        setTimeout(startListeningIfNeeded, 400); // slightly longer after speaking
       }
       setStatus('Listening...');
     };
 
     utter.onerror = () => {
       isSpeakingRef.current = false;
-      if (callActiveRef.current) startListeningIfNeeded();
+      if (callActiveRef.current) {
+        setTimeout(startListeningIfNeeded, 600);
+      }
     };
 
     window.speechSynthesis.speak(utter);
 
+    // Collect for email
     transcriptLinesRef.current.push({ role: 'agent', text });
   };
 
@@ -446,37 +434,183 @@ function App() {
     if (!callActiveRef.current) return;
     if (isListeningRef.current || isSpeakingRef.current) return;
 
-    // Safety limit: stop trying after too many quick failures
-    if (restartAttemptsRef.current > 8) {
-      setStatus('Too many failed attempts — please end & restart call');
-      setDebugInfo(prev => prev + '\nStopped auto-restarting (too many failures)');
-      return;
-    }
-
     try {
+      // Very important on mobile — clean previous session
+      recognitionRef.current.abort?.();
+      
       recognitionRef.current.start();
       isListeningRef.current = true;
-      restartAttemptsRef.current++;
       setStatus('Listening...');
-      setDebugInfo(prev => prev + `\nListening started (attempt ${restartAttemptsRef.current})`);
     } catch (err) {
-      console.warn('recognition.start failed:', err);
-      setDebugInfo(prev => prev + `\nStart failed: ${err.name || err.message}`);
+      console.warn('Recognition start failed:', err);
       isListeningRef.current = false;
-      setTimeout(startListeningIfNeeded, 1400);
+      setTimeout(startListeningIfNeeded, 800); // fallback retry
     }
   };
 
-  // Define endCall BEFORE useEffect that uses it
+  useEffect(() => {
+    const rec = recognitionRef.current;
+    if (!rec) return;
+
+    rec.onresult = async (event) => {
+      const text = event.results[event.results.length - 1][0].transcript.trim();
+      if (!text) return;
+
+      rec.stop?.();
+      isListeningRef.current = false;
+
+      // Collect for email & conversation history
+      transcriptLinesRef.current.push({ role: 'user', text });
+      messagesRef.current.push({ role: 'user', content: text });
+
+      setStatus('Thinking...');
+
+      try {
+        const assistantText = await backendChat(messagesRef.current);
+        messagesRef.current.push({ role: 'assistant', content: assistantText });
+
+        const lower = assistantText.toLowerCase();
+        if (lower.includes('goodbye') || lower.includes('end call') || 
+            lower.includes('hang up') || lower.includes('terminate')) {
+          transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
+          endCall();
+          return;
+        }
+
+        speak(assistantText);
+      } catch (err) {
+        console.error('Backend chat error:', err);
+        setStatus('Connection error — trying again...');
+        setTimeout(startListeningIfNeeded, 1500);
+      }
+    };
+
+    rec.onend = () => {
+      isListeningRef.current = false;
+      if (callActiveRef.current && !isSpeakingRef.current) {
+        // Faster restart when it naturally ends (most common case on mobile)
+        setTimeout(startListeningIfNeeded, 150);
+      }
+    };
+
+    rec.onerror = (e) => {
+      isListeningRef.current = false;
+      console.warn('SpeechRecognition error:', e.error);
+
+      if (e.error === 'no-speech') {
+        setTimeout(startListeningIfNeeded, 300);
+      } else if (e.error === 'aborted') {
+        setTimeout(startListeningIfNeeded, 100);
+      } else if (e.error.includes('permission') || e.error === 'not-allowed') {
+        setStatus('Microphone access denied — check permissions');
+      } else {
+        setTimeout(startListeningIfNeeded, 800);
+      }
+    };
+  }, []);
+
+  const backendChat = async (msgs) => {
+    const res = await fetch(`${API_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: msgs }),
+    });
+    if (!res.ok) throw new Error('chat failed');
+    const { assistant } = await res.json();
+    return assistant || '';
+  };
+
+  const backendSummary = async (fullTranscript) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/summary`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: fullTranscript }),
+      });
+      if (!res.ok) throw new Error('summary endpoint failed');
+      const { summary } = await res.json();
+      return summary || 'No summary was generated';
+    } catch (err) {
+      console.error('Summary generation failed:', err);
+      return 'Could not create summary';
+    }
+  };
+
+  const uploadEmail = async (blob, transcriptText, summaryText) => {
+    try {
+      const form = new FormData();
+      form.append('transcript', transcriptText || 'No transcript available');
+      form.append('summary',    summaryText    || 'No summary available');
+      if (blob) {
+        form.append('recording', blob, 'mortgage-call.webm');
+      }
+
+      const res = await fetch(`${API_BASE}/api/email`, {
+        method: 'POST',
+        body: form,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Email endpoint failed');
+      }
+
+      return await res.json();
+    } catch (err) {
+      console.error('Email sending failed:', err);
+      throw err;
+    }
+  };
+
+  const startCall = async () => {
+    setCallActive(true);
+    transcriptLinesRef.current = [];
+    summaryTextRef.current = '';
+    setRecordingUrl(null);
+    messagesRef.current = [];
+    audioChunksRef.current = [];
+    isListeningRef.current = false;
+    isSpeakingRef.current = false;
+
+    setStatus('Starting call...');
+
+    // Start audio recording
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = e => audioChunksRef.current.push(e.data);
+      recorder.start();
+    } catch (err) {
+      console.error('Microphone access error:', err);
+      alert("Couldn't access microphone. Please allow microphone permission.");
+      setCallActive(false);
+      return;
+    }
+
+    // Get initial greeting
+    try {
+      const greeting = await backendChat([
+        { role: 'user', content: 'Start the conversation with a greeting.' }
+      ]);
+      messagesRef.current.push({ role: 'assistant', content: greeting });
+      speak(greeting);
+    } catch (err) {
+      setStatus('Failed to start conversation');
+      endCall();
+    }
+  };
+
   const endCall = async () => {
     setCallActive(false);
     setStatus('Call ended');
-    restartAttemptsRef.current = 0;
 
     if (recognitionRef.current && isListeningRef.current) {
       recognitionRef.current.stop?.();
+      recognitionRef.current.abort?.();
     }
 
+    // Stop recording & create blob
     let recordingBlob = null;
     if (mediaRecorderRef.current) {
       await new Promise(resolve => {
@@ -489,6 +623,7 @@ function App() {
       });
     }
 
+    // Prepare content for email
     const fullTranscript = transcriptLinesRef.current
       .map(l => `${l.role === 'user' ? 'You' : 'Agent'}: ${l.text}`)
       .join('\n\n');
@@ -511,172 +646,6 @@ function App() {
     }
   };
 
-  // Recognition event handlers
-  useEffect(() => {
-    const rec = recognitionRef.current;
-    if (!rec) return;
-
-    rec.onresult = async (event) => {
-      const text = event.results[event.results.length - 1][0].transcript.trim();
-      if (!text) return;
-
-      rec.stop?.();
-      isListeningRef.current = false;
-      restartAttemptsRef.current = 0; // reset counter on real speech
-      setDebugInfo(prev => prev + `\nHeard: "${text}"`);
-
-      transcriptLinesRef.current.push({ role: 'user', text });
-      messagesRef.current.push({ role: 'user', content: text });
-
-      setStatus('Thinking...');
-
-      try {
-        const assistantText = await backendChat(messagesRef.current);
-        messagesRef.current.push({ role: 'assistant', content: assistantText });
-
-        const lower = assistantText.toLowerCase();
-        if (lower.includes('goodbye') || lower.includes('end call') ||
-            lower.includes('hang up') || lower.includes('terminate')) {
-          transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
-          endCall();
-          return;
-        }
-
-        speak(assistantText);
-      } catch (err) {
-        console.error(err);
-        setStatus('Connection error — please try again');
-        setDebugInfo(prev => prev + `\nBackend error: ${err.message}`);
-        setTimeout(startListeningIfNeeded, 1800);
-      }
-    };
-
-    rec.onend = () => {
-      isListeningRef.current = false;
-      setDebugInfo(prev => prev + '\nRecognition ended');
-
-      if (callActiveRef.current && !isSpeakingRef.current) {
-        // Longer delay to avoid tight loop on mobile
-        setTimeout(startListeningIfNeeded, 1200);
-      }
-    };
-
-    rec.onerror = (e) => {
-      isListeningRef.current = false;
-      setDebugInfo(prev => prev + `\nRecognition error: ${e.error}`);
-
-      if (e.error === 'no-speech') {
-        // Don't restart immediately after silence
-        setTimeout(startListeningIfNeeded, 1400);
-      } else if (e.error === 'not-allowed' || e.error === 'permission-denied') {
-        setStatus('Microphone permission denied');
-      } else if (e.error === 'service-not-allowed') {
-        setStatus('Speech service not available on this device');
-      } else {
-        setTimeout(startListeningIfNeeded, 1600);
-      }
-    };
-
-    return () => {
-      rec.onresult = null;
-      rec.onend = null;
-      rec.onerror = null;
-    };
-  }, [endCall]); // Re-attach if endCall changes (rare)
-
-  const backendChat = async (msgs) => {
-    const res = await fetch(`${API_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: msgs }),
-    });
-    if (!res.ok) throw new Error('chat failed');
-    const { assistant } = await res.json();
-    return assistant || '';
-  };
-
-  const backendSummary = async (fullTranscript) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/summary`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: fullTranscript }),
-      });
-      if (!res.ok) throw new Error('summary failed');
-      const { summary } = await res.json();
-      return summary || 'No summary generated';
-    } catch (err) {
-      console.error('Summary error:', err);
-      return 'Could not create summary';
-    }
-  };
-
-  const uploadEmail = async (blob, transcriptText, summaryText) => {
-    try {
-      const form = new FormData();
-      form.append('transcript', transcriptText || 'No transcript available');
-      form.append('summary', summaryText || 'No summary available');
-      if (blob) form.append('recording', blob, 'mortgage-call.webm');
-
-      const res = await fetch(`${API_BASE}/api/email`, {
-        method: 'POST',
-        body: form,
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Email failed');
-      }
-
-      return await res.json();
-    } catch (err) {
-      console.error('Email error:', err);
-      throw err;
-    }
-  };
-
-  const startCall = async () => {
-    setCallActive(true);
-    transcriptLinesRef.current = [];
-    summaryTextRef.current = '';
-    setRecordingUrl(null);
-    messagesRef.current = [];
-    audioChunksRef.current = [];
-    isListeningRef.current = false;
-    isSpeakingRef.current = false;
-    restartAttemptsRef.current = 0;
-    setDebugInfo('Call started');
-
-    setStatus('Starting call...');
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      recorder.ondataavailable = e => audioChunksRef.current.push(e.data);
-      recorder.start();
-      setDebugInfo(prev => prev + '\nMicrophone access granted');
-    } catch (err) {
-      console.error('Microphone error:', err);
-      setDebugInfo(prev => prev + `\nMic error: ${err.name || err.message}`);
-      alert("Couldn't access microphone. Please allow permission.");
-      setCallActive(false);
-      return;
-    }
-
-    try {
-      const greeting = await backendChat([
-        { role: 'user', content: 'Start the conversation with a greeting.' }
-      ]);
-      messagesRef.current.push({ role: 'assistant', content: greeting });
-      speak(greeting);
-    } catch (err) {
-      setStatus('Failed to connect to server');
-      setDebugInfo(prev => prev + `\nGreeting failed: ${err.message}`);
-      endCall();
-    }
-  };
-
   return (
     <div className="voice-agent-app">
       <div className="main-content">
@@ -692,26 +661,6 @@ function App() {
         </div>
 
         <div className="status-text">{status}</div>
-
-        {/* Debug output — very useful on mobile */}
-        {debugInfo && (
-          <div style={{
-            margin: '1.2rem auto',
-            padding: '1rem',
-            background: 'rgba(0,0,0,0.45)',
-            borderRadius: '12px',
-            fontSize: '0.9rem',
-            color: '#cbd5e1',
-            whiteSpace: 'pre-wrap',
-            textAlign: 'left',
-            maxWidth: '90%',
-            maxHeight: '180px',
-            overflowY: 'auto',
-            lineHeight: 1.4
-          }}>
-            {debugInfo}
-          </div>
-        )}
 
         <div className="controls">
           {!callActive ? (
