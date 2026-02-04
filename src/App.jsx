@@ -1,8 +1,346 @@
+// import { useState, useEffect, useRef } from 'react';
+// import './App.css';
+
+// const API_BASE = 'https://agent.omnisuiteai.com';
+
+
+// function App() {
+//   const [callActive, setCallActive]     = useState(false);
+//   const [status, setStatus]             = useState('Ready to start');
+//   const [recordingUrl, setRecordingUrl] = useState(null);
+
+//   // Keep these for logic — but not displayed anymore
+//   const transcriptLinesRef = useRef([]);     // we still collect for email
+//   const summaryTextRef     = useRef('');     // we still collect for email
+
+//   const recognitionRef     = useRef(null);
+//   const mediaRecorderRef   = useRef(null);
+//   const audioChunksRef     = useRef([]);
+//   const messagesRef        = useRef([]);
+//   const selectedVoiceRef   = useRef(null);
+//   const isListeningRef     = useRef(false);
+//   const isSpeakingRef      = useRef(false);
+//   const callActiveRef      = useRef(false);
+
+//   useEffect(() => { callActiveRef.current = callActive; }, [callActive]);
+
+//   // Speech Recognition setup
+//   useEffect(() => {
+//     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+//     if (!SpeechRecognition) {
+//       alert("Voice recognition is not supported in this browser.");
+//       return;
+//     }
+
+//     const rec = new SpeechRecognition();
+//     rec.continuous     = true;
+//     rec.interimResults = false;
+//     rec.lang           = 'en-US';
+//     recognitionRef.current = rec;
+
+//     return () => rec.abort?.();
+//   }, []);
+
+//   // TTS voice selection
+//   useEffect(() => {
+//     const loadVoices = () => {
+//       const voices = window.speechSynthesis.getVoices();
+//       selectedVoiceRef.current =
+//         voices.find(v => /Google|Microsoft|Natural/i.test(v.name)) ||
+//         voices[0] ||
+//         null;
+//     };
+
+//     window.speechSynthesis.onvoiceschanged = loadVoices;
+//     loadVoices();
+//   }, []);
+
+//   const speak = (text) => {
+//     if (recognitionRef.current && isListeningRef.current) {
+//       recognitionRef.current.stop?.();
+//       isListeningRef.current = false;
+//     }
+
+//     isSpeakingRef.current = true;
+//     setStatus('Speaking...');
+
+//     const utter = new SpeechSynthesisUtterance(text);
+//     if (selectedVoiceRef.current) utter.voice = selectedVoiceRef.current;
+//     utter.rate  = 1.05;
+//     utter.pitch = 1.0;
+
+//     utter.onend = () => {
+//       isSpeakingRef.current = false;
+//       if (callActiveRef.current) {
+//         setTimeout(startListeningIfNeeded, 320);
+//       }
+//       setStatus('Listening...');
+//     };
+
+//     utter.onerror = () => {
+//       isSpeakingRef.current = false;
+//       if (callActiveRef.current) startListeningIfNeeded();
+//     };
+
+//     window.speechSynthesis.speak(utter);
+
+//     // Collect for email (not shown on UI)
+//     transcriptLinesRef.current.push({ role: 'agent', text });
+//   };
+
+//   const startListeningIfNeeded = () => {
+//     if (!recognitionRef.current) return;
+//     if (!callActiveRef.current) return;
+//     if (isListeningRef.current || isSpeakingRef.current) return;
+
+//     try {
+//       recognitionRef.current.start();
+//       isListeningRef.current = true;
+//       setStatus('Listening...');
+//     } catch (err) {
+//       console.warn('start failed', err);
+//       isListeningRef.current = false;
+//     }
+//   };
+
+//   useEffect(() => {
+//     const rec = recognitionRef.current;
+//     if (!rec) return;
+
+//     rec.onresult = async (event) => {
+//       const text = event.results[event.results.length - 1][0].transcript.trim();
+//       if (!text) return;
+
+//       rec.stop?.();
+//       isListeningRef.current = false;
+
+//       // Collect for email
+//       transcriptLinesRef.current.push({ role: 'user', text });
+//       messagesRef.current.push({ role: 'user', content: text });
+
+//       setStatus('Thinking...');
+
+//       try {
+//         const assistantText = await backendChat(messagesRef.current);
+//         messagesRef.current.push({ role: 'assistant', content: assistantText });
+
+//         const lower = assistantText.toLowerCase();
+//         if (lower.includes('goodbye') || lower.includes('end call') || 
+//             lower.includes('hang up') || lower.includes('terminate')) {
+//           transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
+//           endCall();
+//           return;
+//         }
+
+//         speak(assistantText);
+//       } catch (err) {
+//         console.error(err);
+//         setStatus('Connection error — please try again');
+//         setTimeout(startListeningIfNeeded, 1200);
+//       }
+//     };
+
+//     rec.onend = () => {
+//       isListeningRef.current = false;
+//       if (callActiveRef.current && !isSpeakingRef.current) {
+//         setTimeout(startListeningIfNeeded, 250);
+//       }
+//     };
+
+//     rec.onerror = (e) => {
+//       isListeningRef.current = false;
+//       if (e.error === 'no-speech') {
+//         setTimeout(startListeningIfNeeded, 400);
+//       } else if (e.error.includes('permission')) {
+//         setStatus('Microphone access denied');
+//       } else {
+//         setTimeout(startListeningIfNeeded, 800);
+//       }
+//     };
+//   }, []);
+
+//   const backendChat = async (msgs) => {
+//     const res = await fetch(`${API_BASE}/api/chat`, {
+//       method: 'POST',
+//       headers: { 'Content-Type': 'application/json' },
+//       body: JSON.stringify({ messages: msgs }),
+//     });
+//     if (!res.ok) throw new Error('chat failed');
+//     const { assistant } = await res.json();
+//     return assistant || '';
+//   };
+
+//   const backendSummary = async (fullTranscript) => {
+//     try {
+//       const res = await fetch(`${API_BASE}/api/summary`, {
+//         method: 'POST',
+//         headers: { 'Content-Type': 'application/json' },
+//         body: JSON.stringify({ transcript: fullTranscript }),
+//       });
+//       if (!res.ok) throw new Error('summary endpoint failed');
+//       const { summary } = await res.json();
+//       return summary || 'No summary was generated';
+//     } catch (err) {
+//       console.error('Summary generation failed:', err);
+//       return 'Could not create summary';
+//     }
+//   };
+
+//   const uploadEmail = async (blob, transcriptText, summaryText) => {
+//     try {
+//       const form = new FormData();
+//       form.append('transcript', transcriptText || 'No transcript available');
+//       form.append('summary',    summaryText    || 'No summary available');
+//       if (blob) {
+//         form.append('recording', blob, 'mortgage-call.webm');
+//       }
+
+//       const res = await fetch(`${API_BASE}/api/email`, {
+//         method: 'POST',
+//         body: form,
+//       });
+
+//       if (!res.ok) {
+//         const errData = await res.json().catch(() => ({}));
+//         throw new Error(errData.error || 'Email endpoint failed');
+//       }
+
+//       return await res.json();
+//     } catch (err) {
+//       console.error('Email sending failed:', err);
+//       throw err;
+//     }
+//   };
+
+//   const startCall = async () => {
+//     setCallActive(true);
+//     transcriptLinesRef.current = [];
+//     summaryTextRef.current = '';
+//     setRecordingUrl(null);
+//     messagesRef.current = [];
+//     audioChunksRef.current = [];
+//     isListeningRef.current = false;
+//     isSpeakingRef.current = false;
+
+//     setStatus('Starting call...');
+
+//     // Start recording
+//     try {
+//       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+//       const recorder = new MediaRecorder(stream);
+//       mediaRecorderRef.current = recorder;
+//       recorder.ondataavailable = e => audioChunksRef.current.push(e.data);
+//       recorder.start();
+//     } catch (err) {
+//       console.error('Microphone access error:', err);
+//       alert("Couldn't access microphone");
+//       setCallActive(false);
+//       return;
+//     }
+
+//     // Get greeting
+//     try {
+//       const greeting = await backendChat([
+//         { role: 'user', content: 'Start the conversation with a greeting.' }
+//       ]);
+//       messagesRef.current.push({ role: 'assistant', content: greeting });
+//       speak(greeting);
+//     } catch (err) {
+//       setStatus('Failed to start conversation');
+//       endCall();
+//     }
+//   };
+
+//   const endCall = async () => {
+//     setCallActive(false);
+//     setStatus('Call ended');
+
+//     if (recognitionRef.current && isListeningRef.current) {
+//       recognitionRef.current.stop?.();
+//     }
+
+//     // Stop recording & create blob
+//     let recordingBlob = null;
+//     if (mediaRecorderRef.current) {
+//       await new Promise(resolve => {
+//         mediaRecorderRef.current.onstop = () => {
+//           recordingBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+//           setRecordingUrl(URL.createObjectURL(recordingBlob));
+//           resolve();
+//         };
+//         mediaRecorderRef.current.stop?.();
+//       });
+//     }
+
+//     // Prepare content for email
+//     const fullTranscript = transcriptLinesRef.current
+//       .map(l => `${l.role === 'user' ? 'You' : 'Agent'}: ${l.text}`)
+//       .join('\n\n');
+
+//     let summ = '';
+//     try {
+//       summ = await backendSummary(fullTranscript);
+//       summaryTextRef.current = summ;
+//       setStatus('Creating summary • Sending email...');
+//     } catch {
+//       summaryTextRef.current = 'Could not generate summary';
+//     }
+
+//     try {
+//       await uploadEmail(recordingBlob, fullTranscript, summaryTextRef.current);
+//       setStatus('Email sent successfully');
+//     } catch (err) {
+//       setStatus('Could not send email');
+//       console.error('Final email error:', err);
+//     }
+//   };
+
+//   return (
+//     <div className="voice-agent-app">
+//       <div className="main-content">
+//         <h1>Mortgage Voice Agent</h1>
+//         <p className="subtitle">Speak naturally — just like a phone call</p>
+
+//         <div className={`status-circle ${callActive ? (isSpeakingRef.current ? 'speaking' : 'listening') : ''}`}>
+//           <div className="inner-circle">
+//             {callActive
+//               ? (isSpeakingRef.current ? 'Speaking' : 'Listening')
+//               : 'Ready'}
+//           </div>
+//         </div>
+
+//         <div className="status-text">{status}</div>
+
+//         <div className="controls">
+//           {!callActive ? (
+//             <button className="big-btn start" onClick={startCall}>
+//               Start Call
+//             </button>
+//           ) : (
+//             <button className="big-btn end" onClick={endCall}>
+//               End Call
+//             </button>
+//           )}
+//         </div>
+
+//         {recordingUrl && (
+//           <div className="download-section">
+//             <a href={recordingUrl} download="mortgage-call.webm" className="download-link">
+//               Download this call recording
+//             </a>
+//           </div>
+//         )}
+//       </div>
+//     </div>
+//   );
+// }
+
+// export default App;
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const API_BASE = 'https://agent.omnisuiteai.com';
-
+const CHAT_TIMEOUT_MS = 20000; // fail-fast on slow mobile networks
 
 function App() {
   const [callActive, setCallActive]     = useState(false);
@@ -18,9 +356,12 @@ function App() {
   const audioChunksRef     = useRef([]);
   const messagesRef        = useRef([]);
   const selectedVoiceRef   = useRef(null);
+
+  // stateful flags in refs to avoid stale closures
   const isListeningRef     = useRef(false);
   const isSpeakingRef      = useRef(false);
   const callActiveRef      = useRef(false);
+  const requestInFlightRef = useRef(false); // NEW: track if backend call is running
 
   useEffect(() => { callActiveRef.current = callActive; }, [callActive]);
 
@@ -28,17 +369,20 @@ function App() {
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert("Voice recognition is not supported in this browser.");
+      console.warn("SpeechRecognition not supported in this browser.");
       return;
     }
 
     const rec = new SpeechRecognition();
+    // mobile browsers are flaky about 'continuous'. We keep it true but guard restarts.
     rec.continuous     = true;
     rec.interimResults = false;
     rec.lang           = 'en-US';
     recognitionRef.current = rec;
 
-    return () => rec.abort?.();
+    return () => {
+      try { rec.abort?.(); } catch (e) {}
+    };
   }, []);
 
   // TTS voice selection
@@ -56,8 +400,9 @@ function App() {
   }, []);
 
   const speak = (text) => {
+    // stop recognition while speaking (avoid feedback loops)
     if (recognitionRef.current && isListeningRef.current) {
-      recognitionRef.current.stop?.();
+      try { recognitionRef.current.stop?.(); } catch (e) {}
       isListeningRef.current = false;
     }
 
@@ -71,15 +416,22 @@ function App() {
 
     utter.onend = () => {
       isSpeakingRef.current = false;
-      if (callActiveRef.current) {
-        setTimeout(startListeningIfNeeded, 320);
-      }
       setStatus('Listening...');
+      // Only restart listening if call still active and no backend request in flight
+      setTimeout(() => {
+        if (callActiveRef.current && !requestInFlightRef.current) {
+          startListeningIfNeeded();
+        }
+      }, 260);
     };
 
     utter.onerror = () => {
       isSpeakingRef.current = false;
-      if (callActiveRef.current) startListeningIfNeeded();
+      setTimeout(() => {
+        if (callActiveRef.current && !requestInFlightRef.current) {
+          startListeningIfNeeded();
+        }
+      }, 300);
     };
 
     window.speechSynthesis.speak(utter);
@@ -92,82 +444,156 @@ function App() {
     if (!recognitionRef.current) return;
     if (!callActiveRef.current) return;
     if (isListeningRef.current || isSpeakingRef.current) return;
+    if (requestInFlightRef.current) {
+      // Don't restart while waiting for backend
+      console.debug('Skipping start: request in flight');
+      return;
+    }
 
     try {
       recognitionRef.current.start();
       isListeningRef.current = true;
       setStatus('Listening...');
+      console.debug('Recognition started');
     } catch (err) {
       console.warn('start failed', err);
       isListeningRef.current = false;
     }
   };
 
+  // Attach recognition handlers once
   useEffect(() => {
     const rec = recognitionRef.current;
     if (!rec) return;
 
+    // onresult: robust extraction for mobile/desktop variants
     rec.onresult = async (event) => {
-      const text = event.results[event.results.length - 1][0].transcript.trim();
-      if (!text) return;
-
-      rec.stop?.();
-      isListeningRef.current = false;
-
-      // Collect for email
-      transcriptLinesRef.current.push({ role: 'user', text });
-      messagesRef.current.push({ role: 'user', content: text });
-
-      setStatus('Thinking...');
-
+      // extract the most-recent final result in a robust way
       try {
-        const assistantText = await backendChat(messagesRef.current);
-        messagesRef.current.push({ role: 'assistant', content: assistantText });
+        const index = typeof event.resultIndex === 'number'
+          ? event.resultIndex
+          : Math.max(0, event.results.length - 1);
 
+        const result = event.results[index];
+        const text = result && result[0] && result[0].transcript
+          ? result[0].transcript.trim()
+          : // fallback: scan backward for the last non-empty transcript
+            Array.from(event.results).reverse().map(r => r[0]?.transcript?.trim()).find(Boolean) || '';
+
+        if (!text) {
+          console.debug('No text extracted from result');
+          return;
+        }
+
+        // Prevent duplicate onresult storms: stop recognition immediately
+        try { rec.stop?.(); } catch (e) {}
+        isListeningRef.current = false;
+
+        // Collect for email and local messages
+        transcriptLinesRef.current.push({ role: 'user', text });
+        messagesRef.current.push({ role: 'user', content: text });
+
+        setStatus('Thinking...');
+        console.debug('Sending to backend:', text);
+
+        // mark that a request is running
+        requestInFlightRef.current = true;
+
+        // Call backend
+        let assistantText = '';
+        try {
+          assistantText = await backendChat(messagesRef.current);
+        } catch (err) {
+          console.error('backendChat error:', err);
+          setStatus('Connection error — please try again');
+          // clear in-flight and schedule a retry of listening
+          requestInFlightRef.current = false;
+          setTimeout(() => {
+            if (callActiveRef.current && !isSpeakingRef.current) startListeningIfNeeded();
+          }, 1200);
+          return;
+        }
+
+        // backend succeeded
+        messagesRef.current.push({ role: 'assistant', content: assistantText });
+        transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
+
+        // handle agent signals to end the call
         const lower = assistantText.toLowerCase();
-        if (lower.includes('goodbye') || lower.includes('end call') || 
+        if (lower.includes('goodbye') || lower.includes('end call') ||
             lower.includes('hang up') || lower.includes('terminate')) {
-          transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
+          // mark no request in flight before ending
+          requestInFlightRef.current = false;
           endCall();
           return;
         }
 
+        // speak and then restart listening from speak.onend
         speak(assistantText);
-      } catch (err) {
-        console.error(err);
-        setStatus('Connection error — please try again');
-        setTimeout(startListeningIfNeeded, 1200);
+      } finally {
+        // clear request flag only after assistant starts speaking; speak() will handle
+        // but if we reached this finally without starting speak (error path), clear it:
+        requestInFlightRef.current = false;
       }
     };
 
     rec.onend = () => {
       isListeningRef.current = false;
-      if (callActiveRef.current && !isSpeakingRef.current) {
-        setTimeout(startListeningIfNeeded, 250);
+      console.debug('Recognition ended (onend). requestInFlight:', requestInFlightRef.current, 'isSpeaking:', isSpeakingRef.current);
+      // Only restart if call active, not speaking, and no backend request in flight
+      if (callActiveRef.current && !isSpeakingRef.current && !requestInFlightRef.current) {
+        // small delay to avoid immediate start/stop loops on mobile
+        setTimeout(startListeningIfNeeded, 260);
       }
     };
 
     rec.onerror = (e) => {
       isListeningRef.current = false;
-      if (e.error === 'no-speech') {
+      console.warn('Recognition error', e);
+      if (e && e.error === 'no-speech') {
         setTimeout(startListeningIfNeeded, 400);
-      } else if (e.error.includes('permission')) {
+      } else if (e && typeof e.error === 'string' && e.error.includes('permission')) {
         setStatus('Microphone access denied');
       } else {
         setTimeout(startListeningIfNeeded, 800);
       }
     };
-  }, []);
 
+    // cleanup: don't reattach handlers
+    return () => {
+      try {
+        rec.onresult = null;
+        rec.onend = null;
+        rec.onerror = null;
+      } catch (e) {}
+    };
+  }, []); // run once
+
+  // backend chat with timeout and AbortController
   const backendChat = async (msgs) => {
-    const res = await fetch(`${API_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: msgs }),
-    });
-    if (!res.ok) throw new Error('chat failed');
-    const { assistant } = await res.json();
-    return assistant || '';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: msgs }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error('chat failed: ' + res.status + ' ' + body);
+      }
+      const { assistant } = await res.json();
+      return assistant || '';
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error('chat request timed out');
+      }
+      throw err;
+    }
   };
 
   const backendSummary = async (fullTranscript) => {
@@ -214,6 +640,8 @@ function App() {
 
   const startCall = async () => {
     setCallActive(true);
+    callActiveRef.current = true;
+
     transcriptLinesRef.current = [];
     summaryTextRef.current = '';
     setRecordingUrl(null);
@@ -221,6 +649,7 @@ function App() {
     audioChunksRef.current = [];
     isListeningRef.current = false;
     isSpeakingRef.current = false;
+    requestInFlightRef.current = false;
 
     setStatus('Starting call...');
 
@@ -235,17 +664,25 @@ function App() {
       console.error('Microphone access error:', err);
       alert("Couldn't access microphone");
       setCallActive(false);
+      callActiveRef.current = false;
       return;
     }
 
-    // Get greeting
+    // Get greeting from backend and speak
     try {
+      // Mark a request so we don't start recognition until greeting processed
+      requestInFlightRef.current = true;
       const greeting = await backendChat([
         { role: 'user', content: 'Start the conversation with a greeting.' }
       ]);
       messagesRef.current.push({ role: 'assistant', content: greeting });
+      transcriptLinesRef.current.push({ role: 'agent', text: greeting });
+      // speak will clear requestInFlight behavior after it ends
+      requestInFlightRef.current = false;
       speak(greeting);
     } catch (err) {
+      console.error('Failed to start conversation', err);
+      requestInFlightRef.current = false;
       setStatus('Failed to start conversation');
       endCall();
     }
@@ -253,10 +690,11 @@ function App() {
 
   const endCall = async () => {
     setCallActive(false);
+    callActiveRef.current = false;
     setStatus('Call ended');
 
     if (recognitionRef.current && isListeningRef.current) {
-      recognitionRef.current.stop?.();
+      try { recognitionRef.current.stop?.(); } catch (e) {}
     }
 
     // Stop recording & create blob
@@ -268,7 +706,7 @@ function App() {
           setRecordingUrl(URL.createObjectURL(recordingBlob));
           resolve();
         };
-        mediaRecorderRef.current.stop?.();
+        try { mediaRecorderRef.current.stop?.(); } catch (e) { resolve(); }
       });
     }
 
@@ -294,6 +732,27 @@ function App() {
       console.error('Final email error:', err);
     }
   };
+
+  // optional: stop recognition when page hidden (helps mobile background issues)
+  useEffect(() => {
+    const onVis = () => {
+      if (document.hidden) {
+        if (recognitionRef.current && isListeningRef.current) {
+          try { recognitionRef.current.stop?.(); } catch (e) {}
+          isListeningRef.current = false;
+        }
+      } else {
+        // if page visible again, resume if needed
+        setTimeout(() => {
+          if (callActiveRef.current && !isSpeakingRef.current && !requestInFlightRef.current) {
+            startListeningIfNeeded();
+          }
+        }, 350);
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
 
   return (
     <div className="voice-agent-app">
