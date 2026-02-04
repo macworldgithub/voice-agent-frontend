@@ -346,9 +346,13 @@ function App() {
   const [status, setStatus]             = useState('Ready to start');
   const [recordingUrl, setRecordingUrl] = useState(null);
 
+  // Small UI debug for mobile: shows interim / final text
+  const [lastHeard, setLastHeard] = useState('');
+  const [lastAssistant, setLastAssistant] = useState('');
+
   // Keep these for logic — but not displayed anymore
-  const transcriptLinesRef = useRef([]);     // we still collect for email
-  const summaryTextRef     = useRef('');     // we still collect for email
+  const transcriptLinesRef = useRef([]);
+  const summaryTextRef     = useRef('');
 
   const recognitionRef     = useRef(null);
   const mediaRecorderRef   = useRef(null);
@@ -358,13 +362,11 @@ function App() {
   const isListeningRef     = useRef(false);
   const isSpeakingRef      = useRef(false);
   const callActiveRef      = useRef(false);
-
-  // NEW: when true we are waiting for the assistant response or speaking it
   const waitingForAssistantRef = useRef(false);
 
   useEffect(() => { callActiveRef.current = callActive; }, [callActive]);
 
-  // Speech Recognition setup
+  // Speech Recognition setup (mobile-aware)
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -372,9 +374,13 @@ function App() {
       return;
     }
 
+    const isMobile = /Mobi|Android|iPhone|iPad/.test(navigator.userAgent || '');
+
     const rec = new SpeechRecognition();
-    rec.continuous     = true;
-    rec.interimResults = false; // you can experiment with true if you want live interim transcripts
+    // mobile engines are often buggy with continuous=true -> prefer single-shot and restart manually
+    rec.continuous     = !isMobile;
+    rec.interimResults = true; // get interim so we can show and then wait for final
+    rec.maxAlternatives = 1;
     rec.lang           = 'en-US';
     recognitionRef.current = rec;
 
@@ -390,20 +396,19 @@ function App() {
         voices[0] ||
         null;
     };
-
     window.speechSynthesis.onvoiceschanged = loadVoices;
     loadVoices();
   }, []);
 
   const speak = (text) => {
     if (recognitionRef.current && isListeningRef.current) {
-      recognitionRef.current.stop?.();
+      try { recognitionRef.current.stop?.(); } catch(e) {}
       isListeningRef.current = false;
     }
 
-    // We're speaking now; keep waitingForAssistant true so we don't restart listening mid-speech
     isSpeakingRef.current = true;
     setStatus('Speaking...');
+    setLastAssistant(text);
 
     const utter = new SpeechSynthesisUtterance(text);
     if (selectedVoiceRef.current) utter.voice = selectedVoiceRef.current;
@@ -412,13 +417,10 @@ function App() {
 
     utter.onend = () => {
       isSpeakingRef.current = false;
-      // Done speaking -> no longer waiting for assistant
-      waitingForAssistantRef.current = false;
+      waitingForAssistantRef.current = false; // done speaking/waiting
       setStatus('Listening...');
-      if (callActiveRef.current) {
-        // give a small delay and restart listening if appropriate
-        setTimeout(startListeningIfNeeded, 320);
-      }
+      // small delay before re-listen
+      if (callActiveRef.current) setTimeout(startListeningIfNeeded, 320);
     };
 
     utter.onerror = () => {
@@ -428,19 +430,19 @@ function App() {
     };
 
     window.speechSynthesis.speak(utter);
-
-    // Collect for email (not shown on UI)
     transcriptLinesRef.current.push({ role: 'agent', text });
   };
 
   const startListeningIfNeeded = () => {
-    if (!recognitionRef.current) return;
+    const rec = recognitionRef.current;
+    if (!rec) return;
     if (!callActiveRef.current) return;
     if (isListeningRef.current || isSpeakingRef.current) return;
-    if (waitingForAssistantRef.current) return; // don't start while we're waiting for backend / speaking
+    if (waitingForAssistantRef.current) return;
 
     try {
-      recognitionRef.current.start();
+      rec.start();
+      // Some mobile browsers fire onstart asynchronously; set the flag here
       isListeningRef.current = true;
       setStatus('Listening...');
     } catch (err) {
@@ -453,21 +455,50 @@ function App() {
     const rec = recognitionRef.current;
     if (!rec) return;
 
-    rec.onresult = async (event) => {
-      const text = event.results[event.results.length - 1][0].transcript.trim();
-      if (!text) return;
+    rec.onstart = () => {
+      isListeningRef.current = true;
+      setStatus('Listening...');
+    };
 
-      // Stop recognition immediately to avoid partial / duplicate results
+    // Build interim / final correctly (mobile often returns multiple results)
+    rec.onresult = async (event) => {
+      // Assemble interim + final from event.results starting at event.resultIndex
+      let interim = '';
+      let final = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const r = event.results[i];
+        const txt = r[0]?.transcript || '';
+        if (r.isFinal) final += txt;
+        else interim += txt;
+      }
+
+      // show interim to user (debug)
+      if (interim) {
+        setLastHeard(interim);
+        setStatus('Heard (interim): ' + interim.slice(0, 40) + (interim.length > 40 ? '…' : ''));
+        // don't send interim to backend
+        return;
+      }
+
+      // if a final transcript exists, use it
+      const text = (final || '').trim();
+      if (!text) {
+        // nothing final to send; wait for more
+        return;
+      }
+
+      // stop any listening (we will manually restart later)
       try { rec.stop?.(); } catch(e) {}
       isListeningRef.current = false;
 
-      // Mark that we're waiting for assistant now (prevent auto-restarts)
+      // prevent automatic restarts while we call backend / speak
       waitingForAssistantRef.current = true;
 
-      // Collect for email
+      // Collect for email and chat history
       transcriptLinesRef.current.push({ role: 'user', text });
       messagesRef.current.push({ role: 'user', content: text });
 
+      setLastHeard(text);
       setStatus('Thinking...');
 
       try {
@@ -475,43 +506,43 @@ function App() {
         messagesRef.current.push({ role: 'assistant', content: assistantText });
 
         const lower = assistantText.toLowerCase();
-        if (lower.includes('goodbye') || lower.includes('end call') || 
+        if (lower.includes('goodbye') || lower.includes('end call') ||
             lower.includes('hang up') || lower.includes('terminate')) {
           transcriptLinesRef.current.push({ role: 'agent', text: assistantText });
-          // mark not waiting and end call
           waitingForAssistantRef.current = false;
           endCall();
           return;
         }
 
-        // speak will keep waitingForAssistantRef true until speech ends
+        // speak will clear waitingForAssistantRef when done
         speak(assistantText);
       } catch (err) {
-        console.error(err);
+        console.error('backendChat failed:', err);
         waitingForAssistantRef.current = false;
         setStatus('Connection error — please try again');
-        // restart listening after short delay
+        // small backoff then restart listening
         setTimeout(startListeningIfNeeded, 1200);
       }
     };
 
     rec.onend = () => {
       isListeningRef.current = false;
-      // Only restart if call is active AND we're not speaking AND we're not waiting for the assistant
+      // Only restart if not speaking and not waiting for assistant
       if (callActiveRef.current && !isSpeakingRef.current && !waitingForAssistantRef.current) {
-        setTimeout(startListeningIfNeeded, 250);
+        // give engine a little time before restarting
+        setTimeout(startListeningIfNeeded, 300);
       }
     };
 
     rec.onerror = (e) => {
       isListeningRef.current = false;
+      console.warn('recognition error', e);
       if (e.error === 'no-speech') {
-        // If we aren't waiting for assistant, try to restart; otherwise ignore
         if (!waitingForAssistantRef.current) setTimeout(startListeningIfNeeded, 400);
-      } else if (e.error.includes('permission')) {
+      } else if (e.error && e.error.includes && e.error.includes('permission')) {
         setStatus('Microphone access denied');
       } else {
-        // For other errors, only restart if we aren't waiting for assistant
+        // For other errors try a restart unless we're waiting for assistant
         if (!waitingForAssistantRef.current) setTimeout(startListeningIfNeeded, 800);
       }
     };
@@ -523,7 +554,10 @@ function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: msgs }),
     });
-    if (!res.ok) throw new Error('chat failed');
+    if (!res.ok) {
+      const t = await res.text().catch(()=>null);
+      throw new Error('chat failed: ' + (t || res.status));
+    }
     const { assistant } = await res.json();
     return assistant || '';
   };
@@ -549,9 +583,7 @@ function App() {
       const form = new FormData();
       form.append('transcript', transcriptText || 'No transcript available');
       form.append('summary',    summaryText    || 'No summary available');
-      if (blob) {
-        form.append('recording', blob, 'mortgage-call.webm');
-      }
+      if (blob) form.append('recording', blob, 'mortgage-call.webm');
 
       const res = await fetch(`${API_BASE}/api/email`, {
         method: 'POST',
@@ -580,6 +612,8 @@ function App() {
     isListeningRef.current = false;
     isSpeakingRef.current = false;
     waitingForAssistantRef.current = false;
+    setLastHeard('');
+    setLastAssistant('');
 
     setStatus('Starting call...');
 
@@ -603,7 +637,6 @@ function App() {
         { role: 'user', content: 'Start the conversation with a greeting.' }
       ]);
       messagesRef.current.push({ role: 'assistant', content: greeting });
-      // mark waiting while assistant speaks
       waitingForAssistantRef.current = true;
       speak(greeting);
     } catch (err) {
@@ -615,13 +648,9 @@ function App() {
   const endCall = async () => {
     setCallActive(false);
     setStatus('Call ended');
-
-    // Clear waiting flag so onend handlers don't restart
     waitingForAssistantRef.current = false;
 
-    if (recognitionRef.current && isListeningRef.current) {
-      recognitionRef.current.stop?.();
-    }
+    if (recognitionRef.current && isListeningRef.current) recognitionRef.current.stop?.();
 
     // Stop recording & create blob
     let recordingBlob = null;
@@ -632,7 +661,7 @@ function App() {
           setRecordingUrl(URL.createObjectURL(recordingBlob));
           resolve();
         };
-        mediaRecorderRef.current.stop?.();
+        try { mediaRecorderRef.current.stop?.(); } catch(e) { resolve(); }
       });
     }
 
@@ -662,7 +691,7 @@ function App() {
   return (
     <div className="voice-agent-app">
       <div className="main-content">
-        <h1>Mortg Voice Agent</h1>
+        <h1>Mortgage Voice Agent</h1>
         <p className="subtitle">Speak naturally — just like a phone call</p>
 
         <div className={`status-circle ${callActive ? (isSpeakingRef.current ? 'speaking' : 'listening') : ''}`}>
@@ -685,6 +714,11 @@ function App() {
               End Call
             </button>
           )}
+        </div>
+
+        <div style={{ marginTop: 12, fontSize: 13, color: '#666' }}>
+          <div><strong>Heard:</strong> {lastHeard || '—'}</div>
+          <div><strong>Assistant:</strong> {lastAssistant || '—'}</div>
         </div>
 
         {recordingUrl && (
