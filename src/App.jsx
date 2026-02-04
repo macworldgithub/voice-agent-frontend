@@ -66,7 +66,8 @@ function App() {
 
     const utter = new SpeechSynthesisUtterance(text);
     if (selectedVoiceRef.current) utter.voice = selectedVoiceRef.current;
-     utter.rate  = 1.05;
+     // utter.rate  = 1.05;
+     utter.rate  = 1.55;
     utter.pitch = 1.0;
 
     utter.onend = () => {
